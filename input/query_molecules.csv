@@ -1,0 +1,10 @@
+Name,SMILES
+ATP,Nc1ncnc2c1ncn2C1OC(COP(=O)(O)OP(=O)(O)OP(=O)(O)O)C(O)C1O
+estradiol,C[C@]12CC[C@H]3[C@H]([C@@H]1CC[C@@H]2O)CCC4=C3C=CC(=C4)O
+risperidone,CC1=C(C(=O)N2CCCCC2=N1)CCN3CCC(CC3)C4=NOC5=C4C=CC(=C5)F
+Eticlopride,CCC1=CC(=C(C(=C1O)C(=O)NC[C@@H]2CCCN2CC)OC)Cl
+IMATINIB,Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C
+ERLOTINIB,COCCOc1cc2c(cc1OCCOC)ncnc2Nc3cccc(c3)C#C
+Darunavir,CC(C)CN(C[C@H]([C@H](CC1=CC=CC=C1)NC(=O)O[C@H]2CO[C@@H]3[C@H]2CCO3)O)S(=O)(=O)C4=CC=C(C=C4)N
+Inhibitor N3,CC1=CC(=NO1)C(=O)N[C@@H](C)C(=O)N[C@@H](C(C)C)C(=O)N[C@@H](CC(C)C)C(=O)N[C@@H](C[C@@H]2CCNC2=O)/C=C\\C(=O)OCC3=CC=CC=C3
+THC,CCCCCc1cc(c2c(c1)OC(C3C2C=C(CC3)C)(C)C)O
