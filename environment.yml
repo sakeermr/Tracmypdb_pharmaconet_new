@@ -1,0 +1,23 @@
+name: pmnet
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.11
+  - pip>=24.0
+  - pymol-open-source
+  - pytorch-cpu  # CPU-only version (no CUDA - saves ~2GB)
+  - cpuonly  # Ensures no CUDA dependencies
+  - pip:
+      - numpy>=1.26.4,<2.0  # pymol requires numpy<2
+      - numba>=0.59
+      - omegaconf>=2.3.0
+      - molvoxel==0.2.0
+      - gdown>=5.1.0
+      - tqdm
+      - rdkit
+      - openbabel-wheel>=3.1.1.20
+      - biopython>=1.83
+      - pandas  # For results analysis
+      - matplotlib  # For plotting
+      - seaborn  # For statistical visualizations
