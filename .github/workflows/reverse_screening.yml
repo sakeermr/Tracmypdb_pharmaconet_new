@@ -1,0 +1,307 @@
+name: PharmacoNet Reverse Screening
+
+on:
+  # Trigger on push to main when input files change
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'input/pdb_database.csv'
+      - 'input/query_molecules.csv'
+      - '.github/workflows/reverse_screening.yml'
+  
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      num_conformers:
+        description: 'Number of conformers to generate'
+        required: false
+        default: '50'
+      min_score:
+        description: 'Minimum score threshold'
+        required: false
+        default: '5.0'
+      top_n:
+        description: 'Top N results per query'
+        required: false
+        default: '50'
+
+jobs:
+  reverse-screening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720  # 12 hours max
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        lfs: true  # Enable Git LFS for large files
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Free up disk space
+      run: |
+        echo "Disk space before cleanup:"
+        df -h
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        docker system prune -af || true
+        echo "Disk space after cleanup:"
+        df -h
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libxrender1 \
+          libxext6 \
+          libsm6 \
+          libgl1
+    
+    - name: Install Miniconda
+      uses: conda-incubator/setup-miniconda@v3
+      with:
+        auto-update-conda: true
+        python-version: '3.11'
+        miniforge-variant: Miniforge3
+        use-mamba: true
+        channels: conda-forge,defaults
+        channel-priority: strict
+    
+    - name: Create conda environment
+      shell: bash -l {0}
+      run: |
+        echo "Creating CPU-only environment to save disk space..."
+        mamba env create -f environment.yml
+    
+    - name: Install PharmacoNet (CPU-only)
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        # Install PharmacoNet without automatic dependency resolution
+        # Dependencies are already handled by environment.yml
+        pip install -e . --no-deps
+        echo "Installation complete - CPU-only mode"
+    
+    - name: Verify installation
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        python -c "import pmnet; print(f'PharmacoNet version: {pmnet.__version__}')"
+        python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
+        python -c "import rdkit; print(f'RDKit version: {rdkit.__version__}')"
+    
+    - name: Count input entries
+      id: count_inputs
+      run: |
+        PDB_COUNT=$(tail -n +2 input/pdb_database.csv | wc -l)
+        QUERY_COUNT=$(tail -n +2 input/query_molecules.csv | wc -l)
+        echo "pdb_count=$PDB_COUNT" >> $GITHUB_OUTPUT
+        echo "query_count=$QUERY_COUNT" >> $GITHUB_OUTPUT
+        echo "Found $PDB_COUNT proteins and $QUERY_COUNT query molecules"
+    
+    - name: Create output directories
+      run: |
+        mkdir -p output
+        mkdir -p results
+        mkdir -p results/analysis
+    
+    - name: Download PharmacoNet weights
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        python -c "from pmnet.utils.download_weight import download_pretrained_model; import pathlib; weight_path = pathlib.Path.home() / '.local' / 'share' / 'pmnet' / 'pmnet.tar'; weight_path.parent.mkdir(parents=True, exist_ok=True); download_pretrained_model(weight_path, verbose=True)"
+    
+    - name: Build protein pharmacophore database
+      id: build_database
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        echo "Building pharmacophore models for ${{ steps.count_inputs.outputs.pdb_count }} proteins..."
+        echo "This may take several hours for large databases."
+        
+        python batch_modeling.py \
+          --input_csv input/pdb_database.csv \
+          --output_dir output \
+          2>&1 | tee build_database.log
+        
+        # Count generated models
+        MODEL_COUNT=$(find output -name "*.pm" | wc -l)
+        echo "model_count=$MODEL_COUNT" >> $GITHUB_OUTPUT
+        echo "Generated $MODEL_COUNT pharmacophore models"
+    
+    - name: Validate database
+      run: |
+        if [ "${{ steps.build_database.outputs.model_count }}" -eq 0 ]; then
+          echo "ERROR: No pharmacophore models were generated!"
+          exit 1
+        fi
+        echo "Database validation passed: ${{ steps.build_database.outputs.model_count }} models"
+    
+    - name: Run reverse screening
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        
+        # Get input parameters (use workflow_dispatch inputs if available, otherwise defaults)
+        NUM_CONFORMERS=${{ github.event.inputs.num_conformers || '50' }}
+        MIN_SCORE=${{ github.event.inputs.min_score || '5.0' }}
+        TOP_N=${{ github.event.inputs.top_n || '50' }}
+        
+        echo "Running reverse screening with:"
+        echo "  Conformers: $NUM_CONFORMERS"
+        echo "  Min score: $MIN_SCORE"
+        echo "  Top N: $TOP_N"
+        echo "  CPUs: $(nproc)"
+        
+        python reverse_screening.py \
+          --query_csv input/query_molecules.csv \
+          --model_database_dir output \
+          --out results/screening_results.csv \
+          --num_conformers $NUM_CONFORMERS \
+          --min_score $MIN_SCORE \
+          --top_n $TOP_N \
+          --cpus $(nproc) \
+          2>&1 | tee screening.log
+    
+    - name: Analyze results
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        
+        if [ ! -f results/screening_results.csv ]; then
+          echo "ERROR: Screening results not found!"
+          exit 1
+        fi
+        
+        # Check if results file is not empty
+        RESULT_COUNT=$(tail -n +2 results/screening_results.csv | wc -l)
+        echo "Found $RESULT_COUNT screening results"
+        
+        if [ "$RESULT_COUNT" -eq 0 ]; then
+          echo "WARNING: No screening results (all scores below threshold)"
+          echo "Creating empty analysis report..."
+          mkdir -p results/analysis
+          echo "No results found - all scores below threshold" > results/analysis/analysis_report.txt
+        else
+          echo "Analyzing results..."
+          python scripts/analyze_results.py results/screening_results.csv \
+            --output_dir results/analysis \
+            2>&1 | tee analysis.log
+        fi
+    
+    - name: Generate summary report
+      run: |
+        cat > results/SUMMARY.md << 'EOF'
+        # PharmacoNet Reverse Screening Results
+        
+        ## Run Information
+        - **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        - **Workflow:** ${{ github.workflow }}
+        - **Run ID:** ${{ github.run_id }}
+        - **Commit:** ${{ github.sha }}
+        
+        ## Input Summary
+        - **Proteins in database:** ${{ steps.count_inputs.outputs.pdb_count }}
+        - **Pharmacophore models generated:** ${{ steps.build_database.outputs.model_count }}
+        - **Query molecules:** ${{ steps.count_inputs.outputs.query_count }}
+        
+        ## Screening Parameters
+        - **Conformers per molecule:** ${{ github.event.inputs.num_conformers || '50' }}
+        - **Minimum score threshold:** ${{ github.event.inputs.min_score || '5.0' }}
+        - **Top N per query:** ${{ github.event.inputs.top_n || '50' }}
+        - **CPUs used:** $(nproc)
+        
+        ## Output Files
+        - `screening_results.csv` - Raw screening results
+        - `analysis/score_distribution.png` - Score distribution plot
+        - `analysis/score_by_query_boxplot.png` - Per-query comparison
+        - `analysis/query_target_heatmap.png` - Query-target heatmap
+        - `analysis/analysis_report.txt` - Detailed statistical report
+        
+        ## Quick Results Preview
+        
+        EOF
+        
+        # Add top 5 results if available
+        if [ -f results/screening_results.csv ]; then
+          echo "### Top 5 Matches (Highest Scores)" >> results/SUMMARY.md
+          echo '```' >> results/SUMMARY.md
+          head -6 results/screening_results.csv | column -t -s',' >> results/SUMMARY.md
+          echo '```' >> results/SUMMARY.md
+        fi
+        
+        # Add analysis summary if available
+        if [ -f results/analysis/analysis_report.txt ]; then
+          echo "" >> results/SUMMARY.md
+          echo "### Analysis Summary" >> results/SUMMARY.md
+          echo '```' >> results/SUMMARY.md
+          head -30 results/analysis/analysis_report.txt >> results/SUMMARY.md
+          echo '```' >> results/SUMMARY.md
+        fi
+        
+        cat results/SUMMARY.md
+    
+    - name: Upload screening results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: screening-results-${{ github.run_id }}
+        path: |
+          results/
+          !results/**/.gitkeep
+        retention-days: 90
+    
+    - name: Upload pharmacophore models
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: pharmacophore-models-${{ github.run_id }}
+        path: |
+          output/**/*.pm
+        retention-days: 30
+    
+    - name: Upload logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: logs-${{ github.run_id }}
+        path: |
+          build_database.log
+          screening.log
+          analysis.log
+        retention-days: 30
+    
+    - name: Comment on commit (if results found)
+      if: github.event_name == 'push' && success()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read summary
+          let summary = 'Reverse screening completed!';
+          if (fs.existsSync('results/SUMMARY.md')) {
+            summary = fs.readFileSync('results/SUMMARY.md', 'utf8');
+          }
+          
+          // Create comment
+          await github.rest.repos.createCommitComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: context.sha,
+            body: summary
+          });
+    
+    - name: Fail if no models generated
+      if: steps.build_database.outputs.model_count == '0'
+      run: |
+        echo "FATAL: No pharmacophore models were generated!"
+        echo "Check build_database.log for errors."
+        exit 1

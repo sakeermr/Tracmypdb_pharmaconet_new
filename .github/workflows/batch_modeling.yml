@@ -1,0 +1,193 @@
+name: PharmacoNet Batch Modeling
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_csv:
+        description: 'Path to input CSV file'
+        required: false
+        type: string
+        default: 'input/pdb_list.csv'
+      use_gpu:
+        description: 'Use GPU acceleration'
+        required: false
+        type: boolean
+        default: false
+      continue_on_error:
+        description: 'Continue processing on errors'
+        required: false
+        type: boolean
+        default: true
+  
+  push:
+    paths:
+      - 'input/pdb_list.csv'
+    branches:
+      - main
+
+jobs:
+  pharmacophore-modeling:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Free up disk space
+      run: |
+        echo "Disk space before cleanup:"
+        df -h
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        docker system prune -af || true
+        echo "Disk space after cleanup:"
+        df -h
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopenbabel-dev
+    
+    - name: Install Miniconda
+      uses: conda-incubator/setup-miniconda@v3
+      with:
+        auto-update-conda: true
+        python-version: '3.11'
+        miniforge-variant: Miniforge3
+        use-mamba: true
+        channels: conda-forge,pytorch
+        channel-priority: strict
+    
+    - name: Install Python dependencies (CPU-only)
+      shell: bash -l {0}
+      run: |
+        mamba env create -f environment.yml
+        conda activate pmnet
+        pip install -e . --no-deps
+        echo "Installation complete - CPU-only mode"
+    
+    - name: Verify directory structure
+      run: |
+        echo "Current directory: $(pwd)"
+        echo "Directory structure:"
+        ls -la
+        
+        echo -e "\nChecking input directory:"
+        if [ -d "input" ]; then
+          echo "✓ input/ directory exists"
+          ls -la input/
+        else
+          echo "⚠ input/ directory not found, creating it..."
+          mkdir -p input
+          echo "Creating default pdb_list.csv..."
+          echo "PDB_code,Ligand_ID,Chain" > input/pdb_list.csv
+          echo "6oim,MOV,A" >> input/pdb_list.csv
+          echo "✓ Default CSV created"
+        fi
+        
+        echo -e "\nChecking input CSV:"
+        INPUT_CSV="${{ github.event.inputs.input_csv || 'input/pdb_list.csv' }}"
+        if [ -f "$INPUT_CSV" ]; then
+          echo "✓ CSV file found: $INPUT_CSV"
+          echo "CSV contents:"
+          cat "$INPUT_CSV"
+        else
+          echo "✗ CSV file not found: $INPUT_CSV"
+          echo "Please commit input/pdb_list.csv to your repository"
+          exit 1
+        fi
+    
+    - name: Create output directory
+      run: |
+        mkdir -p output
+        echo "✓ output/ directory created"
+    
+    - name: Run batch pharmacophore modeling
+      shell: bash -l {0}
+      run: |
+        conda activate pmnet
+        python batch_modeling.py \
+          --input_csv "${{ github.event.inputs.input_csv || 'input/pdb_list.csv' }}" \
+          --output_dir output \
+          ${{ github.event.inputs.use_gpu == 'true' && '--cuda' || '' }} \
+          ${{ github.event.inputs.continue_on_error == 'true' && '--continue_on_error' || '' }} \
+          --verbose
+    
+    - name: Verify outputs
+      run: |
+        echo "Output directory contents:"
+        ls -laR output/
+        
+        # Count generated files
+        PM_COUNT=$(find output -name "*.pm" | wc -l)
+        PSE_COUNT=$(find output -name "*.pse" | wc -l)
+        
+        echo -e "\nGenerated files:"
+        echo "  - Pharmacophore models (.pm): $PM_COUNT"
+        echo "  - PyMOL sessions (.pse): $PSE_COUNT"
+        
+        if [ $PM_COUNT -eq 0 ]; then
+          echo "✗ No pharmacophore models generated!"
+          exit 1
+        else
+          echo "✓ Successfully generated $PM_COUNT pharmacophore model(s)"
+        fi
+    
+    - name: Upload pharmacophore models
+      uses: actions/upload-artifact@v4
+      with:
+        name: pharmacophore-models
+        path: output/**/*.pm
+        retention-days: 30
+    
+    - name: Upload PyMOL visualizations
+      uses: actions/upload-artifact@v4
+      with:
+        name: pymol-visualizations
+        path: output/**/*.pse
+        retention-days: 30
+    
+    - name: Upload complete output
+      uses: actions/upload-artifact@v4
+      with:
+        name: complete-output
+        path: output/
+        retention-days: 30
+    
+    - name: Generate summary
+      if: always()
+      run: |
+        echo "# Batch Modeling Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- Input CSV: \`${{ github.event.inputs.input_csv || 'input/pdb_list.csv' }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- GPU Acceleration: ${{ github.event.inputs.use_gpu || 'false' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Continue on Error: ${{ github.event.inputs.continue_on_error || 'true' }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -d "output" ]; then
+          PM_COUNT=$(find output -name "*.pm" 2>/dev/null | wc -l)
+          PSE_COUNT=$(find output -name "*.pse" 2>/dev/null | wc -l)
+          
+          echo "## Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Pharmacophore Models: $PM_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- PyMOL Visualizations: $PSE_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Generated Files" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          find output -type f | sort >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "## Results" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Output directory not found" >> $GITHUB_STEP_SUMMARY
+        fi
