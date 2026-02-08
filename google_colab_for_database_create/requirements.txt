@@ -1,0 +1,29 @@
+# PharmacoNet Google Colab Requirements
+# This file lists all Python dependencies needed to run batch_modeling.py in Google Colab
+
+# Deep Learning Framework
+torch>=2.0.0
+torchvision
+torchaudio
+
+# Core Scientific Computing
+numpy==1.26.4
+numba>=0.59
+
+# PharmacoNet Dependencies
+omegaconf>=2.3.0
+molvoxel==0.2.0
+gdown>=5.1.0
+tqdm
+
+# Chemistry Libraries
+rdkit
+openbabel-wheel>=3.1.1.20
+biopython>=1.83
+
+# Data Processing
+pandas
+
+# Additional utilities (optional but recommended)
+matplotlib
+seaborn
