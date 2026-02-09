@@ -1,0 +1,58 @@
+name: Integrated Botanical Discovery Pipeline
+
+on:
+  push:
+    paths:
+      - 'input/input_chemicals.csv'
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # STAGE 1: SSC SEARCH
+      - name: Set up Python for Search
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          
+      - name: Install SSC Deps
+        run: pip install pandas rdkit tqdm
+        
+      - name: Run SSC Similarity Search
+        run: |
+          mkdir -p output
+          python final_optimized_workflow.py --input input/input_chemicals.csv --pdb pdb_ligands.csv --output output/ssc_screening_results.csv
+
+      # STAGE 2: THE BRIDGE
+      - name: Run Bridge Script
+        run: python bridge_script.py
+
+      # STAGE 3: PHARMACONET VERIFICATION
+      - name: Setup Conda for PharmacoNet
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          mamba-version: "*"
+          channels: conda-forge,defaults
+          python-version: '3.11'
+          
+      - name: Create Env and Build Models
+        shell: bash -l {0}
+        run: |
+          mamba env create -f environment.yml
+          conda activate pmnet
+          # Build 3D models for the PDB IDs found in Stage 1
+          python batch_modeling.py --input_csv input/pdb_database.csv --output_dir output/models
+
+      - name: Final 3D Scoring
+        shell: bash -l {0}
+        run: |
+          conda activate pmnet
+          python reverse_screening.py --query_csv input/query_molecules.csv --model_database_dir output/models --out results/final_verified_leads.csv
+
+      - name: Upload Discovery Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: BAIF-Discovery-Results
+          path: results/
